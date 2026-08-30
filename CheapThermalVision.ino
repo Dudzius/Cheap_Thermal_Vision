@@ -6,12 +6,15 @@
 #define I2C_SDA 27
 #define I2C_SCL 22
 
-#define SCREEN_WIDTH 270
-#define SCREEN_HEIGHT 340
+#define SCREEN_W 270
+#define SCREEN_H 340
 
 #define GRID_W 32
 #define GRID_H 24
 #define PIXEL_COUNT (GRID_W * GRID_H)
+
+#define RENDER_W 90
+#define RENDER_H 68
 
 struct ThermalFrame {
   float pixels[PIXEL_COUNT];
@@ -19,6 +22,8 @@ struct ThermalFrame {
   float minTemp;
   float maxTemp;
 };
+
+float renderFrame[RENDER_W * RENDER_H];
 
 //                                      Objects
 
@@ -78,19 +83,22 @@ void showStartupScreen() {
 
   tft.drawString(
     "CHEAP",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     45,
     4);
 
   tft.drawString(
     "THERMAL",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     80,
     4);
 
   tft.drawString(
     "VISION",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     115,
     4);
 
@@ -98,7 +106,8 @@ void showStartupScreen() {
 
   tft.drawString(
     "DISPLAY       OK",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     175,
     2);
 
@@ -107,7 +116,8 @@ void showStartupScreen() {
 
   tft.drawString(
     "MLX90640      ...",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     205,
     2);
 
@@ -116,7 +126,8 @@ void showStartupScreen() {
 
   tft.drawString(
     "V1.0",
-    SCREEN_WIDTH / 2,
+    SCREEN_W
+   / 2,
     280,
     2);
 }
@@ -128,7 +139,8 @@ void showSensorStatus(bool success) {
   tft.fillRect(
     40,
     190,
-    SCREEN_WIDTH - 80,
+    SCREEN_W
+   - 80,
     30,
     TFT_BLACK);
 
@@ -141,7 +153,8 @@ void showSensorStatus(bool success) {
 
     tft.drawString(
       "MLX90640      OK",
-      SCREEN_WIDTH / 2,
+      SCREEN_W
+     / 2,
       205,
       2);
   } else {
@@ -149,7 +162,8 @@ void showSensorStatus(bool success) {
 
     tft.drawString(
       "MLX90640      ERROR",
-      SCREEN_WIDTH / 2,
+      SCREEN_W
+     / 2,
       205,
       2);
   }
@@ -190,6 +204,151 @@ frame.pixels[601] = averageNeighbors(601);
   return true;
 }
 
+//                    preparing thermal data
+
+void interpolateFrame()
+{
+    for (int y = 0; y < RENDER_H; y++)
+    {
+        // Position inside the original sensor grid
+        float sensorY = (float)y * (GRID_H - 1) / (RENDER_H - 1);
+
+        int y0 = (int)sensorY;
+        int y1 = min(y0 + 1, GRID_H - 1);
+
+        float fy = sensorY - y0;
+
+        for (int x = 0; x < RENDER_W; x++)
+        {
+            float sensorX = (float)x * (GRID_W - 1) / (RENDER_W - 1);
+
+            int x0 = (int)sensorX;
+            int x1 = min(x0 + 1, GRID_W - 1);
+
+            float fx = sensorX - x0;
+
+            // Four surrounding sensor pixels
+            float topLeft     = frame.pixels[y0 * GRID_W + x0];
+            float topRight    = frame.pixels[y0 * GRID_W + x1];
+            float bottomLeft  = frame.pixels[y1 * GRID_W + x0];
+            float bottomRight = frame.pixels[y1 * GRID_W + x1];
+
+            // Interpolate horizontally
+            float top = topLeft + (topRight - topLeft) * fx;
+            float bottom = bottomLeft + (bottomRight - bottomLeft) * fx;
+
+            // Interpolate vertically
+            float temperature = top + (bottom - top) * fy;
+
+            renderFrame[y * RENDER_W + x] = temperature;
+        }
+    }
+}
+
+float normalizeTemp(float temp) {
+  float range = frame.maxTemp - frame.minTemp;
+  if (range < 0.1) range = 0.1;  // Prevent division by zero
+  float v = (temp - frame.minTemp) / range;
+  return constrain(v, 0.0, 1.0);
+}
+
+// float normalizeTemp(float temp)
+// {
+//     const float HUMAN_MIN_TEMP = 15.0;
+//     const float HUMAN_MAX_TEMP = 40.0;
+
+//     float v = (temp - HUMAN_MIN_TEMP) /
+//               (HUMAN_MAX_TEMP - HUMAN_MIN_TEMP);
+
+//     return constrain(v, 0.0, 1.0);
+// }
+
+void renderInterpolatedFrame()
+{
+    const int pixelW = SCREEN_W / RENDER_W;  // 3
+    const int pixelH = SCREEN_H / RENDER_H;  // 5
+
+    for (int y = 0; y < RENDER_H; y++)
+    {
+        for (int x = 0; x < RENDER_W; x++)
+        {
+            float temperature = renderFrame[y * RENDER_W + x];
+
+            // Convert temperature into 0.0 - 1.0
+            float value = normalizeTemp(temperature);
+
+            uint8_t r;
+            uint8_t g;
+            uint8_t b;
+
+            /*
+             * Thermal palette:
+             *
+             * 0.00       0.20       0.40       0.60       0.80       1.00
+             *   BLUE ─── CYAN ───── GREEN ─── YELLOW ─── ORANGE ─── RED
+             */
+
+            if (value < 0.20)
+            {
+                // BLUE → CYAN
+                float t = value / 0.20;
+
+                r = 0;
+                g = (uint8_t)(255.0 * t);
+                b = 255;
+            }
+            else if (value < 0.40)
+            {
+                // CYAN → GREEN
+                float t = (value - 0.20) / 0.20;
+
+                r = 0;
+                g = 255;
+                b = (uint8_t)(255.0 * (1.0 - t));
+            }
+            else if (value < 0.60)
+            {
+                // GREEN → YELLOW
+                float t = (value - 0.40) / 0.20;
+
+                r = (uint8_t)(255.0 * t);
+                g = 255;
+                b = 0;
+            }
+            else if (value < 0.80)
+            {
+                // YELLOW → ORANGE
+                float t = (value - 0.60) / 0.20;
+
+                r = 255;
+                g = (uint8_t)(255.0 - (90.0 * t));
+                b = 0;
+            }
+            else
+            {
+                // ORANGE → RED
+                float t = (value - 0.80) / 0.20;
+
+                r = 255;
+                g = (uint8_t)(165.0 * (1.0 - t));
+                b = 0;
+            }
+
+            uint16_t color = tft.color565(r, g, b);
+
+            int screenX = x * pixelW;
+            int screenY = y * pixelH;
+
+            tft.fillRect(
+                screenX,
+                screenY,
+                pixelW,
+                pixelH,
+                color
+            );
+        }
+    }
+}
 // testing sensor data
 // void printThermalFrame() {
 //   Serial.println();
@@ -274,16 +433,19 @@ void setup() {
   bool sensorReady = initThermalSensor();
   showSensorStatus(sensorReady);
 
-//   delay(300);
-
+    delay(2000);
 //   if (readThermalFrame()) {
 //     printThermalFrame();
 //   } else {
 //     Serial.println("Failed to read initial thermal frame!");
 //   }
-// }
+ }
 
 void loop() {
 
-    
+      if (readThermalFrame())
+{
+    interpolateFrame();
+    renderInterpolatedFrame();
+}
 }
